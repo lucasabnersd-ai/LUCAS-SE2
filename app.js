@@ -14,6 +14,22 @@ function applyBootMeta(){
   el.textContent = isNaN(d.getTime()) ? String(BOOT.updatedAt) : d.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
 }
 
+// ===== TOAST =====
+let _toastTimer = null;
+function showToast(msg, type='warn', duration=3500){
+  const el = document.getElementById('toast');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'toast ' + type;
+  void el.offsetWidth;
+  el.classList.add('show');
+  if(_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{ el.classList.remove('show'); }, duration);
+}
+
+// ===== FILTRO ESPECIAL: ABERRAÇÃO DE DATA =====
+let filterAberracao = false;
+
 const sel = {emp:new Set(), st:new Set()};
 const fmtBR = v => 'R$ ' + Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtDt = s => s?s.split('-').reverse().join('/'):'—';
@@ -92,7 +108,7 @@ function populateFilialFilter(){
 })();
 function togEmp(el){ const v=el.dataset.emp; if(sel.emp.has(v)){sel.emp.delete(v);el.classList.remove('on')} else{sel.emp.add(v);el.classList.add('on')} render(true); }
 function togSt(el){ const v=el.dataset.st; if(sel.st.has(v)){sel.st.delete(v);el.classList.remove('on')} else{sel.st.add(v);el.classList.add('on')} render(true); }
-function clearF(){ ['f-num','f-razao','f-forn','f-vmin','f-vmax','f-d1','f-d2','f-em1','f-em2','f-vr1','f-vr2','f-tipo','f-hist','f-filial','f-uuid','f-inc-name','f-inc1','f-inc2','f-alt-name','f-alt1','f-alt2'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';}); sel.emp.clear(); sel.st.clear(); document.querySelectorAll('#p-all .pill.on').forEach(p=>p.classList.remove('on')); render(true); }
+function clearF(){ filterAberracao=false; ['f-num','f-razao','f-forn','f-vmin','f-vmax','f-vliq1','f-vliq2','f-em1','f-em2','f-vr1','f-vr2','f-tipo','f-hist','f-uuid','f-inc-name','f-inc1','f-inc2','f-alt-name','f-alt1','f-alt2'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';}); sel.emp.clear(); sel.st.clear(); document.querySelectorAll('#p-all .pill.on').forEach(p=>p.classList.remove('on')); render(true); }
 
 function atrCls(n){ if(!n) return 'atr-0'; if(n>180) return 'atr-crit'; if(n>60) return 'atr-hi'; return 'atr-med'; }
 function stCls(s){ return {'Vencido':'st-venc','Baixado':'st-baix','A Vencer':'st-aven','Baixa Parcial':'st-parc'}[s]||''; }
@@ -102,7 +118,7 @@ function filtered(){
   const q=gv('f-num').toLowerCase(), rz=gv('f-razao').toLowerCase(), fn=gv('f-forn').toLowerCase();
   const tp=gv('f-tipo').toLowerCase(), ht=gv('f-hist').toLowerCase();
   const vmin=parseFloat(gv('f-vmin'))||-Infinity, vmax=parseFloat(gv('f-vmax'))||Infinity;
-  const d1=gv('f-d1'), d2=gv('f-d2');
+  const vliq1=parseFloat(gv('f-vliq1'))||-Infinity, vliq2=parseFloat(gv('f-vliq2'))||Infinity;
   const em1=gv('f-em1'), em2=gv('f-em2');
   const vr1=gv('f-vr1'), vr2=gv('f-vr2');
   return DATA.filter(r=>{
@@ -112,16 +128,14 @@ function filtered(){
     if(tp && !r.tipo.toLowerCase().includes(tp)) return false;
     if(ht && !r.historico.toLowerCase().includes(ht)) return false;
     if(r.valor<vmin||r.valor>vmax) return false;
-    if(d1 && r.vencimento<d1) return false;
-    if(d2 && r.vencimento>d2) return false;
+    if((r.valLiqBaix||0)<vliq1||(r.valLiqBaix||0)>vliq2) return false;
     if(em1 && r.emissao<em1) return false;
     if(em2 && r.emissao>em2) return false;
     if(vr1 && r.vencReal<vr1) return false;
     if(vr2 && r.vencReal>vr2) return false;
     if(sel.emp.size && !sel.emp.has(companyPairFromRow(r))) return false;
-    const ff=gv('f-filial');
-    if(ff && companyPairFromRow(r)!==ff) return false;
     if(sel.st.size && !sel.st.has(r.status)) return false;
+    if(filterAberracao){ const y=r.vencimento?+r.vencimento.slice(0,4):0; if(y<=2030) return false; }
     if(!rowMatchesUserFilters(r, 'f-')) return false;
     return true;
   });
@@ -130,10 +144,104 @@ function filtered(){
 
 
 // ===== ESTADO =====
-const pagamentos = {}; // id -> {obs,dt}
+const pagamentos = {}; // id -> {obs,dt,acrescimo,decrescimo,statusPag}
 const monitored  = {}; // id -> {obs,ts}
 const selPag = {emp:new Set(), st:new Set()};
 const selMon = {emp:new Set(), st:new Set()};
+const titulosManuais = []; // títulos inseridos manualmente
+let _manualIdCounter = -1; // IDs negativos para manuais
+
+function getManualById(id){ return titulosManuais.find(t=>t.id===id); }
+
+function updatePagAcrescimo(id, val){
+  const v = parseFloat(String(val).replace(',','.')) || 0;
+  const isManual = id < 0;
+  if(isManual){
+    const m = getManualById(id);
+    if(m) m.acrescimo = v;
+  } else {
+    if(!pagamentos[id]) return;
+    pagamentos[id].acrescimo = v;
+  }
+  salvarEstado(); renderPagTotals();
+}
+function updatePagDecrescimo(id, val){
+  const v = parseFloat(String(val).replace(',','.')) || 0;
+  const isManual = id < 0;
+  if(isManual){
+    const m = getManualById(id);
+    if(m) m.decrescimo = v;
+  } else {
+    if(!pagamentos[id]) return;
+    pagamentos[id].decrescimo = v;
+  }
+  salvarEstado(); renderPagTotals();
+}
+function updatePagStatus(id, val){
+  const isManual = id < 0;
+  if(isManual){
+    const m = getManualById(id);
+    if(m) m.statusPag = val;
+  } else {
+    if(!pagamentos[id]) return;
+    pagamentos[id].statusPag = val;
+  }
+  salvarEstado();
+}
+function togAllPag(master, dt){
+  const cbs = document.querySelectorAll('#p-pag .pag-cb');
+  cbs.forEach(cb=>{ cb.checked = master.checked; });
+}
+function marcarStatusBulk(status){
+  const cbs = [...document.querySelectorAll('#p-pag .pag-cb:checked')];
+  if(!cbs.length){ showToast('⚠️ Selecione pelo menos um título','warn'); return; }
+  const ids = cbs.map(cb=>+cb.dataset.id);
+  ids.forEach(id=>updatePagStatus(id, status));
+  salvarEstado();
+  const lbl = status==='Debitado'?'✅ Debitado':status==='Rejeitado'?'❌ Rejeitado':'🔄 Status limpo';
+  showToast(`${lbl} — ${ids.length} título(s) atualizado(s)`, status==='Rejeitado'?'warn':'ok');
+  renderPAG();
+}
+function calcValorTotalPago(saldo, acrescimo, decrescimo){
+  return (saldo||0) + (acrescimo||0) - (decrescimo||0);
+}
+function renderPagTotals(){
+  // Atualiza apenas os campos de valor total pago visíveis na tela
+  document.querySelectorAll('.pag-vtp').forEach(el=>{
+    const saldo = parseFloat(el.dataset.saldo)||0;
+    const idVal = parseInt(el.dataset.id);
+    let acr=0, dec=0;
+    const acrEl = document.querySelector(`.pag-acr-input[data-id="${idVal}"]`);
+    const decEl = document.querySelector(`.pag-dec-input[data-id="${idVal}"]`);
+    if(acrEl) acr = parseFloat(String(acrEl.value).replace(',','.'))||0;
+    if(decEl) dec = parseFloat(String(decEl.value).replace(',','.'))||0;
+    el.textContent = fmtBR(calcValorTotalPago(saldo, acr, dec));
+  });
+  // Atualiza estatísticas
+  updatePagStats();
+}
+function updatePagStats(){
+  let allEntries = Object.entries(pagamentos).map(([id,p])=>({r:DATA.find(x=>x.id===+id),...p,_id:+id})).filter(e=>e.r);
+  titulosManuais.forEach(m=>{ allEntries.push({r:m, ...m, _id:m.id}); });
+  const totPago = allEntries.reduce((s,e)=>{
+    const saldo = e.r.saldo||0;
+    const acr = e.acrescimo||e.r.acrescimo||0;
+    const dec = e.decrescimo||e.r.decrescimo||0;
+    return s + calcValorTotalPago(saldo, acr, dec);
+  },0);
+  const totSaldo = allEntries.reduce((s,e)=>s+(e.r.saldo||0),0);
+  const statEl = document.getElementById('pag-stats');
+  if(statEl){
+    const hj = allEntries.filter(e=>e.dt===today()).length;
+    const dias = new Set(allEntries.map(e=>e.dt)).size;
+    statEl.innerHTML = `
+      <div class="pag-stat"><div class="l">Títulos</div><div class="v">${allEntries.length}</div></div>
+      <div class="pag-stat"><div class="l">Saldo Total</div><div class="v">${fmtBR(totSaldo)}</div></div>
+      <div class="pag-stat"><div class="l">Total Pago</div><div class="v">${fmtBR(totPago)}</div></div>
+      <div class="pag-stat"><div class="l">Dias com envios</div><div class="v">${dias}</div></div>
+      <div class="pag-stat"><div class="l">Enviados hoje</div><div class="v">${hj}</div></div>`;
+  }
+}
 
 
 // ===== PERSISTÊNCIA DE ESTADO (localStorage + UUID) =====
@@ -158,6 +266,7 @@ function salvarEstado(){
     localStorage.setItem('se2_monitored',  JSON.stringify(monitored));
     localStorage.setItem('se2_pagamentos_uuid', JSON.stringify(pagUUID));
     localStorage.setItem('se2_monitored_uuid',  JSON.stringify(monUUID));
+    localStorage.setItem('se2_titulos_manuais', JSON.stringify(titulosManuais));
   }catch(e){}
 }
 
@@ -203,7 +312,16 @@ function restaurarEstado(){
         });
       }
     }catch(_){ /* localStorage pode estar bloqueado; ignore */ }
-    document.getElementById('b-pag').textContent=Object.keys(pagamentos).length;
+    // 4) Restaurar títulos manuais
+    try{
+      const tm = localStorage.getItem('se2_titulos_manuais');
+      if(tm){
+        const arr = JSON.parse(tm);
+        arr.forEach(m=>{ if(!titulosManuais.find(x=>x.id===m.id)) titulosManuais.push(m); });
+        if(titulosManuais.length) _manualIdCounter = Math.min(_manualIdCounter, ...titulosManuais.map(m=>m.id)) - 1;
+      }
+    }catch(_){}
+    document.getElementById('b-pag').textContent=Object.keys(pagamentos).length + titulosManuais.length;
     document.getElementById('b-mon').textContent=Object.keys(monitored).length;
   }catch(e){ console.error('Erro ao restaurar estado:', e); }
 }
@@ -218,7 +336,8 @@ function exportarEstado(){
     monitored_uuid:  monUUID,
     uuids_vistos: DATA.map(r=>r.uuid),
     exportadoEm: new Date().toISOString(),
-    totalPag: Object.keys(pagamentos).length,
+    titulosManuais: titulosManuais,
+    totalPag: Object.keys(pagamentos).length + titulosManuais.length,
     totalMon: Object.keys(monitored).length
   };
   const blob=new Blob([JSON.stringify(estado,null,2)],{type:'application/json'});
@@ -235,9 +354,9 @@ function exportarEstado(){
       '📌 Títulos em monitoramento: ' + estado.totalMon + '\n' +
       '💰 Títulos enviados p/ pagamento: ' + estado.totalPag + '\n\n' +
       '▶ Próximos passos:\n' +
-      '1. Coloque o arquivo se2_estado.json na mesma pasta do script Python\n' +
-      '2. Execute: python atualizar_base.py\n' +
-      '3. Faça upload do novo index.html no Netlify — seus estados estarão preservados!'
+      '1. Salve o arquivo se2_estado.json junto aos arquivos publicados\n' +
+      '2. Rode a rotina de atualização da base\n' +
+      '3. Publique novamente os arquivos estáticos no GitHub Pages ou no host que estiver usando'
     );
   },200);
 }
@@ -257,38 +376,58 @@ function closeMdl(){ document.getElementById('mdl').classList.remove('on'); }
 // Envios
 function sendPag(id){
   const r=DATA.find(x=>x.id===id); if(!r) return;
+  if(pagamentos[id]){
+    showToast(`⚠️ "${r.num} — ${r.razao.slice(0,30)}" já foi enviado para Pagamento!`, 'warn');
+    return;
+  }
   openModal('💰 Enviar para Pagamento',`${r.num} — ${r.razao} — ${fmtBR(r.valor)}`,obs=>{
-    pagamentos[id]={obs,dt:today()}; salvarEstado(); populateEmps('pag'); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length;
+    pagamentos[id]={obs,dt:today()}; salvarEstado(); populateEmps('pag'); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length+titulosManuais.length;
+    showToast(`✅ Título ${r.num} enviado para Pagamento`, 'ok');
     const cb=document.querySelector(`.rcb[data-id="${id}"]`); if(cb) cb.checked=false;
   });
 }
 function sendPagBulk(){
   const ids=[...document.querySelectorAll('#p-all .rcb:checked')].map(c=>+c.dataset.id);
   if(!ids.length){alert('Selecione pelo menos um título'); return;}
-  openModal(`💰 Enviar ${ids.length} títulos`,'Observação aplicada a todos',obs=>{
-    ids.forEach(id=>pagamentos[id]={obs,dt:today()}); salvarEstado(); populateEmps('pag'); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length;
+  const jaEnviados = ids.filter(id=>pagamentos[id]);
+  if(jaEnviados.length === ids.length){ showToast(`⚠️ Todos os ${ids.length} títulos selecionados já foram enviados para Pagamento!`, 'warn'); return; }
+  if(jaEnviados.length){ showToast(`ℹ️ ${jaEnviados.length} título(s) já enviados serão ignorados. Prosseguindo com os demais.`, 'warn', 4000); }
+  const novos = ids.filter(id=>!pagamentos[id]);
+  openModal(`💰 Enviar ${novos.length} títulos`,'Observação aplicada a todos',obs=>{
+    novos.forEach(id=>pagamentos[id]={obs,dt:today()}); salvarEstado(); populateEmps('pag'); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length+titulosManuais.length;
+    showToast(`✅ ${novos.length} título(s) enviados para Pagamento`, 'ok');
     document.querySelectorAll('#p-all .rcb:checked').forEach(cb=>cb.checked=false);
     document.querySelector('#p-all thead input[type=checkbox]').checked=false;
   });
 }
 function openMonitor(id){
   const r=DATA.find(x=>x.id===id); if(!r) return;
+  if(monitored[id]){
+    showToast(`⚠️ "${r.num} — ${r.razao.slice(0,30)}" já está em Monitoramento!`, 'warn');
+    return;
+  }
   openModal('📌 Monitorar',`${r.num} — ${r.razao}`,obs=>{
     const snap={status:DATA.find(x=>x.id===id)?.status,saldo:DATA.find(x=>x.id===id)?.saldo,atraso:DATA.find(x=>x.id===id)?.atraso,vencimento:DATA.find(x=>x.id===id)?.vencimento};
     monitored[id]={obs,ts:today(),snap}; salvarEstado(); populateEmps('mon'); renderMON(); document.getElementById('b-mon').textContent=Object.keys(monitored).length;
+    showToast(`✅ Título ${r.num} adicionado ao Monitoramento`, 'ok');
     const cb=document.querySelector(`.rcb[data-id="${id}"]`); if(cb) cb.checked=false;
   });
 }
 function openMonitorBulk(){
   const ids=[...document.querySelectorAll('#p-all .rcb:checked')].map(c=>+c.dataset.id);
   if(!ids.length){alert('Selecione pelo menos um título'); return;}
-  openModal(`📌 Monitorar ${ids.length} títulos`,'',obs=>{
-    ids.forEach(id=>{const rx=DATA.find(x=>x.id===id); const snap={status:rx?.status,saldo:rx?.saldo,atraso:rx?.atraso,vencimento:rx?.vencimento}; monitored[id]={obs,ts:today(),snap};}); salvarEstado(); populateEmps('mon'); renderMON(); document.getElementById('b-mon').textContent=Object.keys(monitored).length;
+  const jaMonitorados = ids.filter(id=>monitored[id]);
+  if(jaMonitorados.length === ids.length){ showToast(`⚠️ Todos os ${ids.length} títulos selecionados já estão em Monitoramento!`, 'warn'); return; }
+  if(jaMonitorados.length){ showToast(`ℹ️ ${jaMonitorados.length} título(s) já monitorados serão ignorados.`, 'warn', 4000); }
+  const novos = ids.filter(id=>!monitored[id]);
+  openModal(`📌 Monitorar ${novos.length} títulos`,'',obs=>{
+    novos.forEach(id=>{const rx=DATA.find(x=>x.id===id); const snap={status:rx?.status,saldo:rx?.saldo,atraso:rx?.atraso,vencimento:rx?.vencimento}; monitored[id]={obs,ts:today(),snap};}); salvarEstado(); populateEmps('mon'); renderMON(); document.getElementById('b-mon').textContent=Object.keys(monitored).length;
+    showToast(`✅ ${novos.length} título(s) adicionados ao Monitoramento`, 'ok');
     document.querySelectorAll('#p-all .rcb:checked').forEach(cb=>cb.checked=false);
     document.querySelector('#p-all thead input[type=checkbox]').checked=false;
   });
 }
-function removePag(id){delete pagamentos[id]; salvarEstado(); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length;}
+function removePag(id){delete pagamentos[id]; salvarEstado(); renderPAG(); document.getElementById('b-pag').textContent=Object.keys(pagamentos).length+titulosManuais.length;}
 function removeMon(id){delete monitored[id]; salvarEstado(); renderMON(); document.getElementById('b-mon').textContent=Object.keys(monitored).length;}
 function editPagObs(id){
   const r=DATA.find(x=>x.id===id); if(!r) return;
@@ -309,6 +448,77 @@ function editMonObs(id){
   document.getElementById('mdl-ok').onclick=()=>{ monitored[id]={...cur, obs:document.getElementById('mdl-obs').value}; salvarEstado(); closeMdl(); renderMON(); };
 }
 
+// === TÍTULOS MANUAIS ===
+function editManualObs(id){
+  const m = getManualById(id); if(!m) return;
+  document.getElementById('mdl-title').textContent='✏️ Editar Observação';
+  document.getElementById('mdl-desc').textContent=`Manual: ${m.filial} - ${m.empresa} · ${m.tipo}`;
+  document.getElementById('mdl-obs').value=m.obs||'';
+  document.getElementById('mdl').classList.add('on');
+  document.getElementById('mdl-ok').onclick=()=>{ m.obs=document.getElementById('mdl-obs').value; salvarEstado(); closeMdl(); renderPAG(); };
+}
+function removeManual(id){
+  const idx = titulosManuais.findIndex(t=>t.id===id);
+  if(idx>=0) titulosManuais.splice(idx,1);
+  salvarEstado(); renderPAG();
+}
+function openInsertManual(){
+  const mdl = document.getElementById('mdl-manual');
+  if(mdl) mdl.classList.add('on');
+  // Limpar campos
+  ['man-tipo','man-fornecedor','man-saldo','man-acrescimo','man-decrescimo','man-vencimento'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  const sel = document.getElementById('man-status'); if(sel) sel.value='Debitado';
+  // Popular dropdown de Filial-Empresa
+  const dd = document.getElementById('man-filial-empresa');
+  if(dd){
+    const empsMap = new Map();
+    DATA.forEach(r=>{
+      const filial = String(r.filial||'').trim();
+      const empresa = String(r.empresa||'').trim();
+      const key = filial+'|'+empresa;
+      if(!empsMap.has(key)) empsMap.set(key, {filial, empresa, label: filial+' - '+empresa});
+    });
+    const opts = [...empsMap.values()].sort((a,b)=>a.label.localeCompare(b.label,'pt-BR'));
+    dd.innerHTML = '<option value="">Selecione...</option>' + opts.map(o=>`<option value="${escHtml(o.filial)}|${escHtml(o.empresa)}">${escHtml(o.label)}</option>`).join('');
+  }
+  // Reset VTP
+  const vtpEl = document.getElementById('man-vtp'); if(vtpEl) vtpEl.textContent = 'R$ 0,00';
+}
+function closeManualMdl(){ const mdl=document.getElementById('mdl-manual'); if(mdl) mdl.classList.remove('on'); }
+function salvarManual(){
+  const feVal = (document.getElementById('man-filial-empresa').value||'').trim();
+  if(!feVal){ showToast('⚠️ Selecione uma Filial - Empresa','warn'); return; }
+  const [filial, empresa] = feVal.split('|');
+  const tipo = (document.getElementById('man-tipo').value||'').trim();
+  const fornecedor = (document.getElementById('man-fornecedor').value||'').trim();
+  const saldo = parseFloat(String(document.getElementById('man-saldo').value||'0').replace(',','.'))||0;
+  const acrescimo = parseFloat(String(document.getElementById('man-acrescimo').value||'0').replace(',','.'))||0;
+  const decrescimo = parseFloat(String(document.getElementById('man-decrescimo').value||'0').replace(',','.'))||0;
+  const vencimento = document.getElementById('man-vencimento').value||'';
+  const statusPag = document.getElementById('man-status').value||'Debitado';
+  const id = _manualIdCounter--;
+  titulosManuais.push({
+    id, filial, empresa, tipo, num:'MANUAL', parcela:'', razao:empresa,
+    fornecedor:fornecedor, emissao:today(), vencimento:vencimento||today(), vencReal:vencimento||today(),
+    valor:saldo, saldo, status:'Manual', atraso:0, baixa:'', historico:'Inserido manualmente',
+    valLiqBaix:0, numBordero:'', dtBordero:'', dtLiberacao:'', tipoPgto:'', cnpj:'', uuid:'',
+    usrInc:'', usrAlt:'',
+    acrescimo, decrescimo, statusPag,
+    obs:'', dt:today()
+  });
+  salvarEstado(); closeManualMdl(); populateEmps('pag'); renderPAG();
+  showToast('✅ Título manual inserido com sucesso','ok');
+}
+
+function calcManualVTP(){
+  const s = parseFloat(String(document.getElementById('man-saldo').value||'0').replace(',','.'))||0;
+  const a = parseFloat(String(document.getElementById('man-acrescimo').value||'0').replace(',','.'))||0;
+  const d = parseFloat(String(document.getElementById('man-decrescimo').value||'0').replace(',','.'))||0;
+  document.getElementById('man-vtp').textContent = fmtBR(calcValorTotalPago(s, a, d));
+}
+
 // Empresa pills populate
 function populateEmps(kind){
   const src = kind==='pag'?pagamentos:monitored;
@@ -324,6 +534,16 @@ function populateEmps(kind){
     const empresa = String(r.empresa||'').trim();
     empsMap.set(key, { key, filial, empresa, label: [empresa, filial].filter(Boolean).join(' - ') || key });
   });
+  // Incluir empresas de títulos manuais na aba pagamentos
+  if(kind==='pag'){
+    titulosManuais.forEach(m=>{
+      const key = companyPairFromRow(m);
+      if(!key || empsMap.has(key)) return;
+      const filial = String(m.filial||'').trim();
+      const empresa = String(m.empresa||'').trim();
+      empsMap.set(key, { key, filial, empresa, label: [empresa, filial].filter(Boolean).join(' - ') || key });
+    });
+  }
   const emps=[...empsMap.values()].sort((a,b)=>{
     const ea = String(a.empresa).localeCompare(String(b.empresa), 'pt-BR');
     return ea || String(a.filial).localeCompare(String(b.filial), 'pt-BR');
@@ -370,45 +590,71 @@ function clearNEW(){ ['uuid','inc-name','inc1','inc2','alt-name','alt1','alt2'].
 
 // Renderização
 function renderPAG(){
-  let entries = Object.entries(pagamentos).map(([id,p])=>({r:DATA.find(x=>x.id===+id),...p})).filter(e=>e.r);
+  let entries = Object.entries(pagamentos).map(([id,p])=>({r:DATA.find(x=>x.id===+id),...p,_id:+id})).filter(e=>e.r);
+  // Incluir títulos manuais
+  titulosManuais.forEach(m=>{ entries.push({r:m, ...m, _id:m.id}); });
   entries = applyFilters('pag', entries);
-  const tot = entries.reduce((s,e)=>s+e.r.valor,0);
+  // Stats
+  const totSaldo = entries.reduce((s,e)=>s+(e.r.saldo||0),0);
+  const totPago = entries.reduce((s,e)=>{
+    const acr = e.acrescimo||e.r.acrescimo||0;
+    const dec = e.decrescimo||e.r.decrescimo||0;
+    return s + calcValorTotalPago(e.r.saldo||0, acr, dec);
+  },0);
   const hj = entries.filter(e=>e.dt===today()).length;
   const dias = new Set(entries.map(e=>e.dt)).size;
   document.getElementById('pag-stats').innerHTML = `
     <div class="pag-stat"><div class="l">Títulos</div><div class="v">${entries.length}</div></div>
-    <div class="pag-stat"><div class="l">Valor Total</div><div class="v">${fmtBR(tot)}</div></div>
+    <div class="pag-stat"><div class="l">Saldo Total</div><div class="v">${fmtBR(totSaldo)}</div></div>
+    <div class="pag-stat"><div class="l">Total Pago</div><div class="v">${fmtBR(totPago)}</div></div>
     <div class="pag-stat"><div class="l">Dias com envios</div><div class="v">${dias}</div></div>
     <div class="pag-stat"><div class="l">Enviados hoje</div><div class="v">${hj}</div></div>`;
   const groups={}; entries.forEach(e=>{(groups[e.dt]=groups[e.dt]||[]).push(e);});
   const days = Object.keys(groups).sort().reverse();
   if(!days.length){ document.getElementById('pag-list').innerHTML='<div style="text-align:center;padding:40px;color:#64748b">Nenhum título enviado.</div>'; return; }
   document.getElementById('pag-list').innerHTML = days.map(dt=>{
-    const arr=groups[dt]; const t=arr.reduce((s,e)=>s+e.r.valor,0);
+    const arr=groups[dt];
+    const tSaldo=arr.reduce((s,e)=>s+(e.r.saldo||0),0);
     const lbl = dt===today()?' · 📍 HOJE':'';
-    return `<div class="pag-day"><h4><span>📅 ${fmtDt(dt)}${lbl}</span><span style="font-size:12px;color:#64748b;font-weight:500">${arr.length} título(s) · ${fmtBR(t)}</span></h4>
+    return `<div class="pag-day"><h4><span>📅 ${fmtDt(dt)}${lbl}</span><span style="font-size:12px;color:#64748b;font-weight:500">${arr.length} título(s) · Saldo: ${fmtBR(tSaldo)}</span></h4>
       <div class="drag-scroll" style="overflow-x:auto;cursor:grab;user-select:none"><table><thead><tr>
-        <th></th><th>FILIAL - EMPRESA</th><th>TIPO</th><th>Nº TÍTULO</th><th>PARCELA</th>
+        <th style="width:26px"><input type="checkbox" onchange="togAllPag(this,'${dt}')"></th>
+        <th>FILIAL - EMPRESA</th><th>TIPO</th><th>Nº TÍTULO</th><th>PARCELA</th>
         <th>FORNECEDOR</th><th>NOME FORNECE</th>
         <th>VENCIMENTO</th><th>VENCTO REAL</th>
         <th class="num">VLR. TÍTULO</th><th class="num">SALDO</th>
-        <th class="num">ACRÉSCIMO</th><th class="num">DECRÉSCIMO</th>
+        <th class="num" style="min-width:110px">ACRÉSCIMO</th><th class="num" style="min-width:110px">DECRÉSCIMO</th>
+        <th class="num" style="background:#f0fdf4;color:#15803d;min-width:140px">VLR. TOTAL PAGO</th>
+        <th style="min-width:100px">STATUS</th>
         <th>OBS</th><th></th></tr></thead>
-      <tbody>${arr.map(e=>`<tr>
-        <td>🟢</td>
-        <td class="filemp" style="white-space:nowrap;font-weight:600">${e.r.filial} - ${e.r.empresa}</td>
-        <td>${e.r.tipo}</td><td>${e.r.num}</td><td>${e.r.parcela||'—'}</td>
-        <td>${e.r.fornecedor||'—'}</td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.r.razao}">${e.r.razao}</td>
+      <tbody>${arr.map(e=>{
+        const isManual = e._id < 0;
+        const acr = e.acrescimo||e.r.acrescimo||0;
+        const dec = e.decrescimo||e.r.decrescimo||0;
+        const saldo = e.r.saldo||0;
+        const vtp = calcValorTotalPago(saldo, acr, dec);
+        const stPag = e.statusPag||e.r.statusPag||'';
+        const stClass = stPag==='Debitado'?'background:#f0fdf4;color:#15803d':stPag==='Rejeitado'?'background:#fef2f2;color:#b91c1c':'';
+        return `<tr${isManual?' style="background:#fffef0"':''}>
+        <td><input type="checkbox" class="pag-cb" data-id="${e._id}"></td>
+        <td class="filemp" style="white-space:nowrap;font-weight:600">${escHtml(e.r.filial)} - ${escHtml(e.r.empresa)}</td>
+        <td>${escHtml(e.r.tipo)}</td><td>${escHtml(e.r.num||'—')}</td><td>${escHtml(e.r.parcela||'—')}</td>
+        <td>${escHtml(e.r.fornecedor||'—')}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.r.razao)}">${escHtml(e.r.razao)}</td>
         <td>${fmtDt(e.r.vencimento)}</td><td>${fmtDt(e.r.vencReal)}</td>
-        <td class="num" style="white-space:nowrap">${fmtBR(e.r.valor)}</td>
-        <td class="num" style="white-space:nowrap;min-width:130px">${fmtBR(e.r.saldo)}</td>
-        <td class="num">0,00</td><td class="num">0,00</td>
-        <td style="padding:6px 8px;min-width:200px"><div class="obs-box"><span class="obs-txt ${e.obs?'':'vazio'}">${e.obs||'Clique para adicionar...'}</span><button class="obs-edit-btn" onclick="editPagObs(${e.r.id})" title="Editar observação">✏️</button></div></td>
-        <td><button class="ab-mn" onclick="removePag(${e.r.id})">✕</button></td>
-      </tr>`).join('')}</tbody></table></div></div>`;
+        <td class="num" style="white-space:nowrap">${fmtBR(e.r.valor||saldo)}</td>
+        <td class="num" style="white-space:nowrap;min-width:130px">${fmtBR(saldo)}</td>
+        <td class="num"><input type="text" class="pag-acr-input" data-id="${e._id}" value="${acr?acr.toFixed(2).replace('.',','):''}" placeholder="0,00" oninput="updatePagAcrescimo(${e._id},this.value)" style="width:90px;padding:4px 6px;border:1px solid #dde1ee;border-radius:5px;font-size:12px;text-align:right"></td>
+        <td class="num"><input type="text" class="pag-dec-input" data-id="${e._id}" value="${dec?dec.toFixed(2).replace('.',','):''}" placeholder="0,00" oninput="updatePagDecrescimo(${e._id},this.value)" style="width:90px;padding:4px 6px;border:1px solid #dde1ee;border-radius:5px;font-size:12px;text-align:right"></td>
+        <td class="num pag-vtp" data-saldo="${saldo}" data-id="${e._id}" style="font-weight:700;white-space:nowrap;background:#f0fdf4;color:#15803d">${fmtBR(vtp)}</td>
+        <td style="text-align:center">${stPag==='Debitado'?'<span class="status" style="background:#f0fdf4;color:#15803d;border:1px solid #86efac">✅ Debitado</span>':stPag==='Rejeitado'?'<span class="status" style="background:#fef2f2;color:#b91c1c;border:1px solid #fca5a5">❌ Rejeitado</span>':'<span style="color:#94a3b8;font-size:11px">—</span>'}</td>
+        <td style="padding:6px 8px;min-width:200px"><div class="obs-box"><span class="obs-txt ${e.obs?'':'vazio'}">${e.obs||'Clique para adicionar...'}</span><button class="obs-edit-btn" onclick="${isManual?`editManualObs(${e._id})`:`editPagObs(${e.r.id})`}" title="Editar observação">✏️</button></div></td>
+        <td><button class="ab-mn" onclick="${isManual?`removeManual(${e._id})`:`removePag(${e.r.id})`}">✕</button></td>
+      </tr>`;
+}).join('')}</tbody></table></div></div>`;
   }).join('');
   applyDrag('#p-pag');
+  document.getElementById('b-pag').textContent = Object.keys(pagamentos).length + titulosManuais.length;
 }
 
 function buildDiff(snap,r){
@@ -493,7 +739,7 @@ function applyDrag(sel){
   document.querySelectorAll(sel+' .drag-scroll').forEach(el=>{
     if(el.dataset.drag) return; el.dataset.drag='1';
     let d=false,sx=0,sl=0;
-    el.addEventListener('mousedown',ev=>{if(ev.target.tagName==='BUTTON'||ev.target.tagName==='INPUT')return; d=true;sx=ev.pageX-el.offsetLeft;sl=el.scrollLeft;el.style.cursor='grabbing';ev.preventDefault();});
+    el.addEventListener('mousedown',ev=>{if(ev.target.tagName==='BUTTON'||ev.target.tagName==='INPUT'||ev.target.tagName==='SELECT'||ev.target.tagName==='OPTION')return; d=true;sx=ev.pageX-el.offsetLeft;sl=el.scrollLeft;el.style.cursor='grabbing';ev.preventDefault();});
     el.addEventListener('mouseleave',()=>{d=false;el.style.cursor='grab';});
     el.addEventListener('mouseup',()=>{d=false;el.style.cursor='grab';});
     el.addEventListener('mousemove',ev=>{if(!d)return;el.scrollLeft=sl-(ev.pageX-el.offsetLeft-sx);});
@@ -501,11 +747,19 @@ function applyDrag(sel){
 }
 
 function downloadPAG(){
-  let entries = Object.entries(pagamentos).map(([id,p])=>({r:DATA.find(x=>x.id===+id),...p})).filter(e=>e.r);
+  let entries = Object.entries(pagamentos).map(([id,p])=>({r:DATA.find(x=>x.id===+id),...p,_id:+id})).filter(e=>e.r);
+  titulosManuais.forEach(m=>{ entries.push({r:m, ...m, _id:m.id}); });
   entries = applyFilters('pag', entries);
   if(!entries.length){alert('Nada para baixar'); return;}
-  const head='DataEnvio;Filial-Empresa;Tipo;Num;Parcela;Fornecedor;NomeFornece;Vencimento;VenctoReal;Valor;Saldo;Observacao';
-  const body=entries.map(e=>[e.dt,e.r.filial+' - '+e.r.empresa,e.r.tipo,e.r.num,e.r.parcela,e.r.fornecedor,e.r.razao,e.r.vencimento,e.r.vencReal,e.r.valor,e.r.saldo,(e.obs||'').replace(/;/g,',')].join(';')).join('\n');
+  const head='DataEnvio;Filial-Empresa;Tipo;Num;Parcela;Fornecedor;NomeFornece;Vencimento;VenctoReal;VlrTitulo;Saldo;Acrescimo;Decrescimo;ValorTotalPago;Status;Observacao';
+  const body=entries.map(e=>{
+    const acr=e.acrescimo||e.r.acrescimo||0;
+    const dec=e.decrescimo||e.r.decrescimo||0;
+    const saldo=e.r.saldo||0;
+    const vtp=calcValorTotalPago(saldo,acr,dec);
+    const st=e.statusPag||e.r.statusPag||'';
+    return [e.dt,e.r.filial+' - '+e.r.empresa,e.r.tipo,e.r.num,e.r.parcela,e.r.fornecedor,e.r.razao,e.r.vencimento,e.r.vencReal,e.r.valor||saldo,saldo,acr,dec,vtp,st,(e.obs||'').replace(/;/g,',')].join(';');
+  }).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['\ufeff'+head+'\n'+body],{type:'text/csv;charset=utf-8'})); a.download='pagamentos.csv'; a.click();
 }
 function downloadMON(){
@@ -631,17 +885,24 @@ function getAberr(){ return DATA.filter(r=>{ if(!r.vencimento) return false; con
 function getAberrCrit(){ return DATA.filter(r=>{ if(!r.vencimento) return false; const y=+r.vencimento.slice(0,4); return y>3000; }); }
 
 
+function analisarAberracao(){
+  filterAberracao = true;
+  sel.emp.clear(); sel.st.clear();
+  document.querySelectorAll('#p-all .pill.on').forEach(p=>p.classList.remove('on'));
+  tab('all');
+  render(true);
+  showToast(`🔍 Filtrando títulos com aberração de data (vencimento após 2030)`, 'warn', 4000);
+}
+
 function renderAlertsTop(){
   const parc = DATA.filter(r=>r.status==='Baixa Parcial');
   const c180 = DATA.filter(r=>r.atraso>180);
-  const c90  = DATA.filter(r=>r.atraso>90 && r.atraso<=180);
   const fmtLst = a => a.slice(0,3).map(r=>`${r.razao.slice(0,35)}: ${fmtBR(r.saldo)} — ${r.atraso}d`).join(' | ');
   const sum = a => a.reduce((s,r)=>s+r.saldo,0);
   let html = '';
   if(c180.length) html += `<div class="alert"><div><div class="at">⚠ ${c180.length} título(s) SE2 vencidos há +180 dias</div><div class="ad">${fmtLst(c180)}<br><b>Total: ${fmtBR(sum(c180))}</b></div></div><div class="av" onclick="goStatus('Vencido')">→ ver títulos</div></div>`;
-  if(c90.length)  html += `<div class="alert warn"><div><div class="at">⚠ ${c90.length} título(s) vencidos entre 90-180 dias sem compensação</div><div class="ad">${fmtLst(c90)}<br><b>Total: ${fmtBR(sum(c90))}</b></div></div><div class="av" onclick="goStatus('Vencido')">→ ver títulos</div></div>`;
-  const aberr = getAberr(); if(aberr.length) html += `<div class="alert" style="border-left-color:#7c3aed"><div><div class="at">🚨 ${aberr.length} título(s) com ABERRAÇÃO DE DATA (vencimento após 2030)</div><div class="ad">${aberr.slice(0,3).map(r=>`${r.razao.slice(0,35)}: venc. ${fmtDt(r.vencimento)} — ${fmtBR(r.saldo)}`).join(' | ')}</div></div><div class="av" onclick="tab('all')">→ analisar</div></div>`;
-  if(parc.length) html += `<div class="alert info"><div><div class="at">ℹ ${parc.length} título(s) com Baixa Parcial</div><div class="ad">${fmtLst(parc)}<br><b>Saldo em aberto: ${fmtBR(sum(parc))}</b></div></div><div class="av" onclick="goStatus('Baixa Parcial')">→ ver títulos</div></div>`;
+  const aberr = getAberr(); if(aberr.length) html += `<div class="alert" style="border-left-color:#7c3aed"><div><div class="at">🚨 ${aberr.length} título(s) com ABERRAÇÃO DE DATA (vencimento após 2030)</div><div class="ad">${aberr.slice(0,3).map(r=>`${r.razao.slice(0,35)}: venc. ${fmtDt(r.vencimento)} — ${fmtBR(r.saldo)}`).join(' | ')}</div></div><div class="av" onclick="analisarAberracao()">→ analisar títulos</div></div>`;
+  if(parc.length) html += `<div class="alert info"><div><div class="at">ℹ ${parc.length} título(s) com Baixa Parcial</div><div class="ad">${parc.slice(0,3).map(r=>`${r.razao.slice(0,35)}: ${fmtBR(r.saldo)} — ${r.atraso}d`).join(' | ')}<br><b>Saldo em aberto: ${fmtBR(sum(parc))}</b></div></div><div class="av" onclick="goStatus('Baixa Parcial')">→ ver títulos</div></div>`;
   document.getElementById('alerts-top').innerHTML = html;
 }
 
@@ -666,7 +927,7 @@ function download(){
 (function(){
   document.querySelectorAll('.drag-scroll').forEach(el=>{
     let down=false,sx=0,sl=0;
-    el.addEventListener('mousedown',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='BUTTON')return; down=true; sx=e.pageX-el.offsetLeft; sl=el.scrollLeft; el.style.cursor='grabbing'; e.preventDefault();});
+    el.addEventListener('mousedown',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='BUTTON'||e.target.tagName==='SELECT'||e.target.tagName==='OPTION')return; down=true; sx=e.pageX-el.offsetLeft; sl=el.scrollLeft; el.style.cursor='grabbing'; e.preventDefault();});
     el.addEventListener('mouseleave',()=>{down=false; el.style.cursor='grab';});
     el.addEventListener('mouseup',()=>{down=false; el.style.cursor='grab';});
     el.addEventListener('mousemove',e=>{if(!down)return; el.scrollLeft=sl-(e.pageX-el.offsetLeft-sx);});
@@ -795,7 +1056,7 @@ function renderNEW(){
       <td><span class="status ${stCls(r.status)}">${r.status}</span></td>
       <td class="atraso"><span class="${atrCls(r.atraso)}">${r.atraso||'—'}</span></td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#64748b" title="${r.historico}">${r.historico}</td>
-      <td style="text-align:center">${r.uuid?`<button type="button" class="uuid-copy-btn" data-uuid="${escHtml(r.uuid)}" onclick="copyUUID(this)" title="Copiar UUID">📋</button>`:'—'}</td>
+      <td style="text-align:center;white-space:nowrap;font-size:13px">${r.uuid?`<button type="button" class="uuid-copy-btn" data-uuid="${escHtml(r.uuid)}" onclick="copyUUID(this)" title="Copiar UUID">📋</button>`:'—'}</td>
       <td style="font-size:11px;color:#334155">${escHtml(i.name)}</td>
       <td style="font-size:11px;color:#64748b;background:#ede9fe">${i.date||'—'}</td>
       <td style="font-size:11px;color:#334155">${escHtml(alt.name)}</td>
@@ -806,4 +1067,3 @@ function renderNEW(){
   document.getElementById('new-list').innerHTML=`<div class="drag-scroll" style="overflow-x:auto;cursor:grab;user-select:none"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
   applyDrag('#p-new');
 }
-
